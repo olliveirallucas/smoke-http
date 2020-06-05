@@ -156,7 +156,8 @@ public struct HTTPOperationsClient {
         let request = try HTTPClient.Request(url: endpoint, method: httpMethod,
                                              headers: requestHeaders, body: .data(sendBody))
                 
- 
+        logger.debug("Request endpoint: \(endpoint), method: \(httpMethod), headers: \(requestHeaders), body: \(sendBody).")
+
         let responseFuture = self.wrappedHttpClient.execute(request: request)
         responseFuture.whenComplete { result in
             self.handleCompleteResponse(invocationContext: invocationContext,

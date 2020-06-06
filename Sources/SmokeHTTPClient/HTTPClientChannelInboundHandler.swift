@@ -239,6 +239,8 @@ public final class HTTPClientChannelInboundHandler: ChannelInboundHandler {
                                               method: httpMethod, uri: endpointPath)
         httpRequestHead.headers = HTTPHeaders(headers)
 
+        Log.debug("Request endpoint: \(endpointUrl), method: \(httpMethod), headers: \(headers), body: \(bodyData).")
+
         // copy the body data to a ByteBuffer
         var buffer = ctx.channel.allocator.buffer(capacity: bodyData.count)
         let array = [UInt8](bodyData)

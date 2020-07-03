@@ -113,6 +113,64 @@ public struct HTTPOperationsClient {
             completion: @escaping (Result<HTTPResponseComponents, HTTPClientError>) -> (),
             invocationContext: HTTPClientInvocationContext<InvocationReportingType, HandlerDelegateType>) throws -> EventLoopFuture<HTTPClient.Response>
             where InputType: HTTPRequestInputProtocol {
+        let (responseFuture, outwardsRequestContext) = try performExecuteAsync(endpointOverride: endpointOverride,
+                                                                               endpointPath: endpointPath,
+                                                                               httpMethod: httpMethod,
+                                                                               input: input,
+                                                                               invocationContext: invocationContext)
+
+        responseFuture.whenComplete { result in
+            do {
+                let responseComponents = try self.handleCompleteResponse(invocationContext: invocationContext,
+                                                                         outwardsRequestContext: outwardsRequestContext,
+                                                                         result: result)
+                completion(.success(responseComponents))
+            } catch let error as HTTPClientError {
+                completion(.failure(error))
+            } catch {
+                // if a non-HTTPClientError is thrown, wrap it
+                let responseError = HTTPClientError(responseCode: 400, cause: error)
+                completion(.failure(responseError))
+            }
+        }
+                
+        return responseFuture
+    }
+    
+    func executeAsync<InputType, InvocationReportingType: HTTPClientInvocationReporting, HandlerDelegateType: HTTPClientInvocationDelegate>(
+            endpointOverride: URL? = nil,
+            endpointPath: String,
+            httpMethod: HTTPMethod,
+            input: InputType,
+            invocationContext: HTTPClientInvocationContext<InvocationReportingType, HandlerDelegateType>) throws -> EventLoopFuture<HTTPResponseComponents>
+            where InputType: HTTPRequestInputProtocol {
+        let (responseFuture, outwardsRequestContext) = try performExecuteAsync(endpointOverride: endpointOverride,
+                                                                               endpointPath: endpointPath,
+                                                                               httpMethod: httpMethod,
+                                                                               input: input,
+                                                                               invocationContext: invocationContext)
+        return responseFuture.flatMapThrowing { result in
+            return try self.handleCompleteResponse(invocationContext: invocationContext,
+                                                   outwardsRequestContext: outwardsRequestContext,
+                                                   result: .success(result))
+        } .flatMapErrorThrowing { error in
+            if error is HTTPClientError {
+                throw error
+            } else {
+                // if a non-HTTPClientError is thrown, wrap it
+                throw HTTPClientError(responseCode: 400, cause: error)
+            }
+        }
+    }
+    
+    private func performExecuteAsync<InputType, InvocationReportingType: HTTPClientInvocationReporting, HandlerDelegateType: HTTPClientInvocationDelegate>(
+            endpointOverride: URL? = nil,
+            endpointPath: String,
+            httpMethod: HTTPMethod,
+            input: InputType,
+            invocationContext: HTTPClientInvocationContext<InvocationReportingType, HandlerDelegateType>) throws
+        -> (EventLoopFuture<HTTPClient.Response>, InvocationReportingType.TraceContextType.OutwardsRequestContext)
+            where InputType: HTTPRequestInputProtocol {
 
         let endpointHostName = endpointOverride?.host ?? self.endpointHostName
         let endpointPort = endpointOverride?.port ?? self.endpointPort
@@ -158,25 +216,18 @@ public struct HTTPOperationsClient {
                 
  
         let responseFuture = self.wrappedHttpClient.execute(request: request)
-        responseFuture.whenComplete { result in
-            self.handleCompleteResponse(invocationContext: invocationContext,
-                                        outwardsRequestContext: outwardsRequestContext,
-                                        completion: completion,
-                                        result: result)
-        }
                 
-        return responseFuture
+        return (responseFuture, outwardsRequestContext)
     }
     
     /*
      Handles when the response has been completely received.
      */
     private func handleCompleteResponse<InvocationReportingType: HTTPClientInvocationReporting,
-                HandlerDelegateType: HTTPClientInvocationDelegate>(
+        HandlerDelegateType: HTTPClientInvocationDelegate>(
             invocationContext: HTTPClientInvocationContext<InvocationReportingType, HandlerDelegateType>,
             outwardsRequestContext: InvocationReportingType.TraceContextType.OutwardsRequestContext,
-            completion: @escaping (Result<HTTPResponseComponents, HTTPClientError>) -> (),
-            result: Result<HTTPClient.Response, Error>) {
+            result: Result<HTTPClient.Response, Error>) throws -> HTTPResponseComponents {
         let invocationReporting = invocationContext.reporting
         let logger = invocationReporting.logger
         
@@ -212,8 +263,7 @@ public struct HTTPOperationsClient {
                     response: response, bodyData: bodyData)
                 
                 // complete with the response data (potentially empty)
-                completion(.success(responseComponents))
-                return
+                return responseComponents
             }
 
             // Handle client delegated errors
@@ -226,21 +276,17 @@ public struct HTTPOperationsClient {
                     internalRequestId: invocationReporting.internalRequestId,
                     response: response, bodyData: bodyData, error: error)
                 
-                completion(.failure(error))
-                return
+                throw error
             }
 
-            let responseError: HTTPClientError
+            let responseError: Error
             do {
                  let errorProvider: (HTTPClient.Response, HTTPResponseComponents, InvocationReportingType) throws
                     -> HTTPClientError = self.clientDelegate.getResponseError
                 // attempt to get the error from the provider
                 responseError = try errorProvider(response, responseComponents, invocationReporting)
-            } catch let error as HTTPClientError {
-                responseError = error
             } catch {
-                // if the provider throws an error, use this error
-                responseError = HTTPClientError(responseCode: 400, cause: error)
+                responseError = error
             }
             
             invocationReporting.traceContext.handleOutwardsRequestFailure(
@@ -250,18 +296,17 @@ public struct HTTPOperationsClient {
                 response: response, bodyData: bodyData, error: responseError)
 
             // complete with the error
-            completion(.failure(responseError))
+            throw responseError
             
         case .failure(let error):
-            let cause: HTTPError
             let wrappingError: HTTPClientError
             
             switch error {
             case ChannelError.connectTimeout:
-                cause = HTTPError.connectionError("Connection timed out")
+                let cause = HTTPError.connectionError("Connection timed out")
                 wrappingError = HTTPClientError(responseCode: 500, cause: cause)
             default:
-                cause = HTTPError.badResponse("Request failed")
+                let cause = HTTPError.badResponse("Request failed")
                 wrappingError = HTTPClientError(responseCode: 400, cause: cause)
             }
             
@@ -272,7 +317,7 @@ public struct HTTPOperationsClient {
                 response: nil, bodyData: nil, error: error)
 
             // complete with this error
-            completion(.failure(wrappingError))
+            throw wrappingError
         }
     }
     
